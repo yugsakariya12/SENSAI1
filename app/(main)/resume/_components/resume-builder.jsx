@@ -32,7 +32,8 @@ export default function ResumeBuilder({ initialContent }) {
   const [previewContent, setPreviewContent] = useState(initialContent);
   const { user } = useUser();
   const [resumeMode, setResumeMode] = useState("preview");
-const [pdfReady, setPdfReady] = useState(false);
+  const [pdfReady, setPdfReady] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
 
   const {
     control,
@@ -59,25 +60,23 @@ const [pdfReady, setPdfReady] = useState(false);
     error: saveError,
   } = useFetch(saveResume);
 
-  // Watch form fields for preview updates
   const formValues = watch();
 
   useEffect(() => {
     if (initialContent) setActiveTab("preview");
   }, [initialContent]);
 
-  // Update preview content when form values change
   useEffect(() => {
     if (activeTab === "edit") {
       const newContent = getCombinedContent();
       setPreviewContent(newContent ? newContent : initialContent);
     }
   }, [formValues, activeTab]);
-useEffect(() => {
-  setPdfReady(true);
-}, []);
 
-  // Handle save result
+  useEffect(() => {
+    setPdfReady(true);
+  }, []);
+
   useEffect(() => {
     if (saveResult && !isSaving) {
       toast.success("Resume saved successfully!");
@@ -116,50 +115,98 @@ useEffect(() => {
       .join("\n\n");
   };
 
-  const [isGenerating, setIsGenerating] = useState(false);
-
 const generatePDF = async () => {
+  const content = previewContent || getCombinedContent();
+  if (!content || content.trim() === "") {
+    toast.error("Nothing to download. Please fill in your resume first.");
+    return;
+  }
+
   setIsGenerating(true);
   try {
-    const html2pdf = (await import("html2pdf.js")).default;
+    const { marked } = await import("marked");
+    const html2canvas = (await import("html2canvas")).default;
+    const { jsPDF } = await import("jspdf");
 
-    const element = document.getElementById("resume-pdf");
-    if (!element) {
-      console.error("PDF element not found");
-      return;
+    const rawHtml = marked.parse(content);
+
+    // Create fully isolated iframe
+    const iframe = document.createElement("iframe");
+    iframe.style.cssText = "position:fixed;top:0;left:0;width:794px;height:1123px;visibility:hidden;border:none;";
+    document.body.appendChild(iframe);
+
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+    iframeDoc.open();
+    iframeDoc.write(`<!DOCTYPE html><html><head><style>
+      * { margin:0; padding:0; box-sizing:border-box; }
+      body { font-family:Arial,sans-serif; font-size:14px; line-height:1.6; color:#000; background:#fff; padding:40px; width:794px; }
+      h1 { font-size:24px; font-weight:bold; margin:16px 0 8px; }
+      h2 { font-size:20px; font-weight:bold; margin:14px 0 6px; border-bottom:1px solid #ccc; padding-bottom:4px; }
+      h3 { font-size:16px; font-weight:bold; margin:12px 0 4px; }
+      p { margin:6px 0; }
+      ul,ol { margin:6px 0; padding-left:20px; }
+      li { margin:2px 0; }
+      a { color:#0000EE; }
+      strong { font-weight:bold; }
+      hr { border:none; border-top:1px solid #ccc; margin:12px 0; }
+      div { text-align:center; }
+    </style></head><body>${rawHtml}</body></html>`);
+    iframeDoc.close();
+
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    const canvas = await html2canvas(iframeDoc.body, {
+      scale: 2,
+      backgroundColor: "#ffffff",
+      useCORS: true,
+      windowWidth: 794,
+    });
+
+    document.body.removeChild(iframe);
+
+    const imgData = canvas.toDataURL("image/jpeg", 0.98);
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const imgWidth = pageWidth;
+    const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+    let heightLeft = imgHeight;
+    let position = 0;
+
+    pdf.addImage(imgData, "JPEG", 0, position, imgWidth, imgHeight);
+    heightLeft -= pageHeight;
+
+    while (heightLeft > 0) {
+      position -= pageHeight;
+      pdf.addPage();
+      pdf.addImage(imgData, "JPEG", 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
     }
 
-    const opt = {
-      margin: 10,
-      filename: "resume.pdf",
-      image: { type: "jpeg", quality: 0.98 },
-      html2canvas: {
-        scale: 2,
-        useCORS: true,
-        backgroundColor: "#ffffff", // force white
-      },
-      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-    };
-
-    await html2pdf().set(opt).from(element).save();
+    pdf.save("resume.pdf");
+    toast.success("PDF downloaded!");
   } catch (error) {
     console.error("PDF generation error:", error);
+    toast.error("Failed to generate PDF");
   } finally {
     setIsGenerating(false);
   }
 };
 
-
-
-  const onSubmit = async (data) => {
+  const onSubmit = async () => {
     try {
-      const formattedContent = previewContent
-        .replace(/\n/g, "\n") // Normalize newlines
-        .replace(/\n\s*\n/g, "\n\n") // Normalize multiple newlines to double newlines
+      const contentToSave = previewContent || getCombinedContent();
+      if (!contentToSave || contentToSave.trim() === "") {
+        toast.error("Nothing to save. Please fill in some details first.");
+        return;
+      }
+      const formattedContent = contentToSave
+        .replace(/\n/g, "\n")
+        .replace(/\n\s*\n/g, "\n\n")
         .trim();
 
-      console.log(previewContent, formattedContent);
-      await saveResumeFn(previewContent);
+      await saveResumeFn(formattedContent);
     } catch (error) {
       console.error("Save error:", error);
     }
@@ -174,7 +221,7 @@ const generatePDF = async () => {
         <div className="space-x-2">
           <Button
             variant="destructive"
-            onClick={handleSubmit(onSubmit)}
+            onClick={onSubmit}
             disabled={isSaving}
           >
             {isSaving ? (
@@ -216,8 +263,7 @@ const generatePDF = async () => {
             {/* Contact Information */}
             <div className="space-y-4">
               <h3 className="text-lg font-medium">Contact Information</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border rounded-lg bg-muted/50
-">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border rounded-lg bg-muted/50">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Email</label>
                   <Input
@@ -421,35 +467,8 @@ const generatePDF = async () => {
               preview={resumeMode}
             />
           </div>
-          
-
-
-        
-        
-
-
-
-        
-        
-        
-        
-        
         </TabsContent>
       </Tabs>
-       <div className="hidden">
-  <div id="resume-pdf">
-    <MDEditor.Markdown
-      source={previewContent}
-      style={{
-        background: "white",
-        color: "black",
-        padding: "20px",
-        fontFamily: "sans-serif",
-        lineHeight: "1.4",
-      }}
-    />
-  </div>
-</div>
     </div>
   );
 }
